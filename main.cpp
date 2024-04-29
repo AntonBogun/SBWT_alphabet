@@ -9,6 +9,7 @@
 #include <omp.h>
 #include <atomic>
 #include <filesystem>
+#include <thread>
 
 // #include "Main/ColorSearchMain.h"
 // #include "Main/IndexSearchMain.h"
@@ -103,19 +104,30 @@ int main3()
         rrrb_rank(dis(gen));
     end = __get_now();
     __get_duration("Rank queries on rrr_vector", start, end);
+    return 0;
 }
 
+enum class leaderboard_type{
+    anagram,
+    kangaroo,
+    n_kangaroo
+};
+
+bool global_filter_condition(const std::string& str) {
+    // return str.size() > 3;
+    return true;
+}
 bool filter_condition(const std::string& str) {
     return str.size() > 2;
     // return true;
 }
 double weight_condition(const std::string& str, const std::string& parent) {
-    // return str.size()*str.size();
+    return ((double)str.size())*str.size()/parent.size();
     // return ((double)str.size())/parent.size();
 // if(subword in word) return 0
 // else return len(subword)/len(word)
-    if(parent.find(str)!=std::string::npos) return 0;//when subword in word
-    return ((double)str.size())/parent.size();
+    // if(parent.find(str)!=std::string::npos) return 0;//when subword in word
+    // return ((double)str.size())/parent.size();
 }
 
 struct PriorityQueueItem {
@@ -130,38 +142,63 @@ struct PriorityQueueItem {
 std::mutex cout_mutex;
 std::atomic<int> progress(0);
 std::atomic<int64_t> total_subword(0);
+std::atomic<int> kangaroo_num(2);
 void processLines(const std::vector<std::string>& lines, 
                   const SBWT_alphabet& sbwt, 
                   const std::unordered_map<string,int64_t>& unique_words,
                   std::vector<std::priority_queue<PriorityQueueItem>>& pqs,
                   size_t start, size_t end, int thread_id, 
-                  std::atomic<long long>& global_time,
-                  bool do_kangaroo_search = 1) {
+                  int64_t global_time,
+                //   bool do_kangaroo_search = 1) {
+                  leaderboard_type lb_type = leaderboard_type::kangaroo) {
     for(size_t i = start; i < end; i++) {
         // auto matches = sbwt.kangaroo_search(lines[i], unique_words);
         unordered_set<int64_t> matches;
-        if(do_kangaroo_search){
+        unordered_set<MatchCollection,MatchCollectionHash> matches2;
+        if(lb_type==leaderboard_type::kangaroo){
             matches = sbwt.kangaroo_search(lines[i], unique_words);
+        } else if(lb_type==leaderboard_type::n_kangaroo){
+            matches2 = sbwt.n_kangaroo_search(lines[i], unique_words, kangaroo_num);
         }else{
             matches = sbwt.anagram_search(lines[i], unique_words);
         }
         // auto matches = sbwt.anagram_search(lines[i], unique_words);
         // size_t true_count = matches.size();
-        total_subword += matches.size();
-        size_t true_count = 0; for(auto match : matches) true_count+=filter_condition(lines[match]);
-        double weighted_count = 0; for(auto match : matches) weighted_count+=filter_condition(lines[match])*weight_condition(lines[match], lines[i]);
+        size_t true_count = 0;
+        double weighted_count = 0;
+        if(!(lb_type==leaderboard_type::n_kangaroo)){
+            total_subword += matches.size();
+             for(auto match : matches) true_count+=filter_condition(lines[match]);
+             for(auto match : matches) weighted_count+=filter_condition(lines[match])*weight_condition(lines[match], lines[i]);
+        }else{
+            true_count+=matches2.size();
+            for(auto coll : matches2){
+                for(int64_t m : coll.v){
+                    weighted_count+=weight_condition(lines[m], lines[i]);
+                }
+            }
+            // if(lines[i]=="cholestyramines"){
+            //     cout << "cholestyramines: " << true_count << " " << weighted_count << std::endl;
+            //     for(auto coll : matches2){
+            //         for(int64_t m : coll.v){
+            //             cout << lines[m] << " ";
+            //         }
+            //         cout << std::endl;
+            //     }
+            // }
+        }
         if(pqs[thread_id].size() < 200) {
             pqs[thread_id].push({weighted_count,true_count, lines[i]});
-        } else if(true_count > pqs[thread_id].top().size) {
+        } else if(weighted_count > pqs[thread_id].top().weighted_size) {
             pqs[thread_id].pop();
             pqs[thread_id].push({weighted_count,true_count, lines[i]});
         }
         int p = ++progress;
         if (p % 500 == 0 && p != 0) {
-            auto now = std::chrono::steady_clock::now();
+            auto now = __get_now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() - global_time;
-            auto expected_duration = duration * lines.size() / p;
-            auto expected_seconds_left = (expected_duration - duration) / 1000;
+            int64_t expected_duration = duration * lines.size() / p;
+            int64_t expected_seconds_left = (expected_duration - duration) / 1000;
             std::lock_guard<std::mutex> guard(cout_mutex);
             std::cerr << "\rThread " << thread_id << ": Line " << p << "/" << lines.size() << ", ETA: " << expected_seconds_left << "s" << std::flush;
         }
@@ -173,18 +210,19 @@ priority_queue<PriorityQueueItem> calc_leaderboard(const std::vector<std::string
                   const SBWT_alphabet& sbwt, 
                   const std::unordered_map<string,int64_t>& unique_words,
                   int num_threads,
-                  bool do_kangaroo_search = 1) {
+                //   bool do_kangaroo_search = 1) {
+                  leaderboard_type lb_type = leaderboard_type::kangaroo) {
         progress = 0;
         total_subword = 0;
             std::vector<std::thread> threads(num_threads);
         std::vector<std::priority_queue<PriorityQueueItem>> pqs(num_threads);
         auto start = __get_now();
-        std::atomic<long long> global_time = std::chrono::duration_cast<std::chrono::milliseconds>(start.time_since_epoch()).count();
+        int64_t global_time = std::chrono::duration_cast<std::chrono::milliseconds>(start.time_since_epoch()).count();
         size_t lines_per_thread = lines.size() / num_threads;
         for(size_t t = 0; t < num_threads; t++) {
             size_t start = t * lines_per_thread;
             size_t end = (t == num_threads - 1) ? lines.size() : (t + 1) * lines_per_thread;
-            threads[t] = std::thread(processLines, std::ref(lines), std::ref(sbwt), std::ref(unique_words), std::ref(pqs), start, end, t, std::ref(global_time), do_kangaroo_search);
+            threads[t] = std::thread(processLines, std::ref(lines), std::ref(sbwt), std::ref(unique_words), std::ref(pqs), start, end, t, global_time, lb_type);
         }
         for(auto& thread : threads) {
             thread.join();
@@ -228,7 +266,9 @@ int main2(int argc, char **argv) {
         // lines.push_back(line);
         //lowercase the line
         std::transform(line.begin(), line.end(), line.begin(), ::tolower);
-        lines.push_back(line);
+    if(global_filter_condition(line)){
+            lines.push_back(line);
+        }
     }
 
     std::set<char> unique_chars;
@@ -291,10 +331,10 @@ int main2(int argc, char **argv) {
         bins[lines[i].size()].push_back(lines[i]);
     }
     int64_t total = 0;
-    // for(size_t i = 0; i < bins.size(); ++i) {
-    //     std::cout << "Bin " << i << ": " << bins[i].size() << " strings" << std::endl;
-    //     total += bins[i].size();
-    // }
+    for(size_t i = 0; i < bins.size(); ++i) {
+        // std::cout << "Bin " << i << ": " << bins[i].size() << " strings" << std::endl;
+        total += bins[i].size();
+    }
     std::cout << "Total number of strings: " << total << std::endl;
     auto start = __get_now();
     std::unordered_set<std::string> unique_substrings;
@@ -378,6 +418,12 @@ int main2(int argc, char **argv) {
         int64_t match=sbwt.search(s);
         if(match==-1){
             std::cout<<s<<": not found"<<std::endl;
+            exit(1);
+            break;
+        }
+        if(!sbwt.word_bit_vectors[s.size()-1][match]){
+            std::cout<<s<<": bitvector not set"<<std::endl;
+            exit(1);
             break;
         }
     }
@@ -419,18 +465,21 @@ int main2(int argc, char **argv) {
         //     auto expected_seconds_left = (expected_duration - duration) / 1000;
         //     std::cerr << "String " << i << "/" << lines.size() << ", ETA: " << expected_seconds_left << "s" << std::flush;
         // }
-    bool do_single_word_search = 1;
-    bool do_leaderboard = 0;
-    bool do_kangaroo_leaderboard = 1;
-    bool do_anagram_leaderboard = 1;
+    bool do_single_word_search = 0;
+    bool do_leaderboard = 1;
+    bool do_kangaroo_leaderboard = 0;
+    bool do_anagram_leaderboard = 0;
+    kangaroo_num=2;
+    bool do_n_kangaroo_leaderboard = 1;
     if (do_single_word_search) {
         string str="softheartedness";
         if(argc==3){
             str=argv[2];
         }
 
-        bool do_kangaroo_search = 1;
-        bool do_anagram_search = 1;
+        bool do_kangaroo_search = 0;
+        bool do_anagram_search = 0;
+        bool do_n_kangaroo_search = 1;
         // unordered_set<int64_t> matches = sbwt.anagram_search(str, unique_words);
 
         //=
@@ -455,6 +504,19 @@ int main2(int argc, char **argv) {
             }
             out_stream.close();
         }
+
+        if(do_n_kangaroo_search){
+            unordered_set<MatchCollection,MatchCollectionHash> matches = sbwt.n_kangaroo_search(str, unique_words, kangaroo_num);
+            // ofstream out_stream("C:\\Code\\SBWT_alphabet\\anagrams4.txt");
+            ofstream out_stream((p.parent_path() / "kangaroo_covers.txt").string());
+            for(auto coll : matches){
+                for(int64_t m : coll.v){
+                    out_stream<<lines[m] << " ";
+                }
+                out_stream<<std::endl;
+            }
+            out_stream.close();
+        }
         //=
 
         // if(matches.size()>max_len_match){
@@ -474,11 +536,11 @@ int main2(int argc, char **argv) {
     //=
 
     if(do_leaderboard){
-        int num_threads = 4;
+        int num_threads = 8;
         // int num_threads = std::thread::hardware_concurrency();
         cout << "Number of threads: " << num_threads << std::endl;
         if(do_kangaroo_leaderboard){
-            priority_queue<PriorityQueueItem> pq=calc_leaderboard(lines, sbwt, unique_words, num_threads, 1);
+            priority_queue<PriorityQueueItem> pq=calc_leaderboard(lines, sbwt, unique_words, num_threads, leaderboard_type::kangaroo);
             // ofstream out_stream("C:\\Code\\SBWT_alphabet\\anagrams6.txt");
             ofstream out_stream((p.parent_path() / "kangaroo_leaderboard.txt").string());
             while(!pq.empty()){
@@ -486,10 +548,10 @@ int main2(int argc, char **argv) {
                 out_stream<<pq.top().str<<": "<<pq.top().size<<", ("<<pq.top().weighted_size<<")"<<std::endl;
                 pq.pop();
             }
-            cout<<"Total subwords: "<<total_subword<<std::endl;
+            cout<<"Total kangaroo words: "<<total_subword<<std::endl;
         }
         if(do_anagram_leaderboard){
-            priority_queue<PriorityQueueItem> pq=calc_leaderboard(lines, sbwt, unique_words, num_threads, 0);
+            priority_queue<PriorityQueueItem> pq=calc_leaderboard(lines, sbwt, unique_words, num_threads, leaderboard_type::anagram);
             // ofstream out_stream("C:\\Code\\SBWT_alphabet\\anagrams7.txt");
             ofstream out_stream((p.parent_path() / "anagrams_leaderboard.txt").string());
             while(!pq.empty()){
@@ -497,11 +559,22 @@ int main2(int argc, char **argv) {
                 out_stream<<pq.top().str<<": "<<pq.top().size<<", ("<<pq.top().weighted_size<<")"<<std::endl;
                 pq.pop();
             }
-            cout<<"Total subwords: "<<total_subword<<std::endl;
+            cout<<"Total sub-anagrams: "<<total_subword<<std::endl;
+        }
+        if(do_n_kangaroo_leaderboard){
+            priority_queue<PriorityQueueItem> pq=calc_leaderboard(lines, sbwt, unique_words, num_threads, leaderboard_type::n_kangaroo);
+            // ofstream out_stream("C:\\Code\\SBWT_alphabet\\anagrams7.txt");
+            ofstream out_stream((p.parent_path() / "n_kangaroo_leaderboard.txt").string());
+            while(!pq.empty()){
+                // out_stream<<pq.top().str<<": "<<pq.top().size<<std::endl;
+                out_stream<<pq.top().str<<": "<<pq.top().size<<", ("<<pq.top().weighted_size<<")"<<std::endl;
+                pq.pop();
+            }
+            cout<<"Total kangaroo covers: "<<total_subword<<std::endl;
         }
 
         end = __get_now();
-        __get_duration("Anagram search", start, end);
+        __get_duration("Kangaroo/Anagram search", start, end);
         // cout<<max_len_str<<": "<<max_len_match<<std::endl;
     }
     return 0;

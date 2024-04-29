@@ -52,8 +52,16 @@ endif()
 #   add_compile_options(/O1)
 # endif()
 
+# if(CMAKE_BUILD_TYPE MATCHES Debug)
+#   add_compile_options(/W4 )
+# endif()
+
+if(CMAKE_BUILD_TYPE MATCHES Release)
+  add_compile_options(-O3)
+endif()
+
 if(CMAKE_BUILD_TYPE MATCHES Debug)
-  add_compile_options(/W4 )
+  add_compile_options(-g -Wall -Wextra -Wno-sign-compare)
 endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
@@ -67,10 +75,10 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
   set(CXX_FILESYSTEM_LIBRARIES "stdc++fs")
 endif()
 
-if(MSVC)
-  set(CMAKE_CXX_FLAGS_RELEASE "/MT")
-  set(CMAKE_CXX_FLAGS_DEBUG "/MTd")
-endif()
+# if(MSVC)
+#   set(CMAKE_CXX_FLAGS_RELEASE "/MT")
+#   set(CMAKE_CXX_FLAGS_DEBUG "/MTd")
+# endif()
 
 # find_package(Threads REQUIRED)
 

@@ -56,6 +56,31 @@ struct range{
     }
 };
 
+struct MatchCollection{
+    vector<int64_t> v;
+    int64_t collisions=0;
+    bool operator==(const MatchCollection& other) const{
+        if(v.size() != other.v.size()) return false;
+        for(int i = 0; i < v.size(); i++){
+            if(v[i] != other.v[i]) return false;
+        }
+        return true;
+    }
+};
+struct MatchCollectionHash {
+    size_t operator()(const MatchCollection& m) const {
+        std::hash<int64_t> hasher;
+        size_t seed = 1;
+        // for (int64_t i : v) {
+        //     seed ^= hasher(i) + 0x9e3779b9 + (seed<<6) + (seed>>2);
+        // }
+        for(int i = 0; i < m.v.size(); i++){
+            seed = (seed*m.v[i])%SIZE_MAX;
+        }
+        return seed;
+    }
+};
+
 class SBWT_alphabet{
 
 public:
@@ -64,8 +89,9 @@ public:
     std::vector<int64_t> C; // The array of cumulative character counts
     std::vector<sd_vector<>> bit_vectors; // The bit vectors for each character
     std::vector<sd_vector<>::rank_1_type> rank_supports; // The rank support structures for each character
-    std::vector<bit_vector> word_bit_vectors; // 1 if corresponding k-mer of that length is a word
-    std::vector<sdsl::rank_support_v5<>> word_rank_supports;
+    std::vector<sd_vector<>> word_bit_vectors; // 1 if corresponding k-mer of that length is a word
+    std::vector<sd_vector<>::rank_1_type> word_rank_supports;
+    std::vector<std::vector<int64_t>> word_position_lookup; 
     int k;
 //     vector<pair<int64_t,int64_t> > kmer_prefix_precalc; // SBWT intervals for all p-mers with p = precalc_k.
 //     int64_t precalc_k = 0;
@@ -134,17 +160,23 @@ public:
 
         // Initialize the word bit vectors
         __start = __get_now();
+        vector<bit_vector> _word_bit_vectors(k);
+        for(int i = 0; i < k; i++) _word_bit_vectors[i] = bit_vector(n_kmers, 0);
         word_bit_vectors.resize(k);
-        for(int i = 0; i < k; i++) word_bit_vectors[i] = bit_vector(n_kmers, 0);
-
         word_rank_supports.resize(k);
+        word_position_lookup.resize(k);
         for(int i = 0; i < n_kmers; i++){
-            if(words.find(sorted_kmers[i]) != words.end()){
-                word_bit_vectors[sorted_kmers[i].size()-1][i] = 1;
+            auto find = words.find(sorted_kmers[i]);
+            if(find != words.end()){
+                _word_bit_vectors[sorted_kmers[i].size()-1][i] = 1;
+                word_position_lookup[sorted_kmers[i].size()-1].push_back(find->second);
             }
         }
         for(int i = 0; i < k; i++){
-            word_rank_supports[i] = rank_support_v5<>(&word_bit_vectors[i]);
+            word_bit_vectors[i] = sd_vector<>(_word_bit_vectors[i]);
+        }
+        for(int i = 0; i < k; i++){
+            word_rank_supports[i] = sd_vector<>::rank_1_type(&word_bit_vectors[i]);
         }
         __end = __get_now();
         __get_duration("word bit vectors done", __start, __end);
@@ -167,7 +199,12 @@ public:
         for(int i = 0; i < k; i++){
             word_bit_vectors[i].serialize(out);
         }
-        //save k
+        //save lookup table
+        for(int i = 0; i < k; i++){
+            for(int64_t pos : word_position_lookup[i]){
+                out.write((char*)&pos, sizeof(pos));
+            }
+        }
     }
     void load(const string& filename){
         std::ifstream in(filename, std::ios::binary); // Replace throwing_ifstream with std::ifstream
@@ -187,7 +224,7 @@ public:
         word_rank_supports.resize(k);
         for(int i = 0; i < k; i++){
             word_bit_vectors[i].load(in);
-            word_rank_supports[i] = rank_support_v5<>(&word_bit_vectors[i]);
+            word_rank_supports[i] = sd_vector<>::rank_1_type(&word_bit_vectors[i]);
         }
 
         C.resize(26+2);
@@ -196,7 +233,16 @@ public:
         for(int i = 0; i < 26; i++){
             C[i+2] = C[i+1] + rank_supports[i](bit_vectors[i].size());
         }
-
+        //load lookup table
+        word_position_lookup.resize(k);
+        for(int i = 0; i < k; i++){
+            int64_t num_positions = word_rank_supports[i](word_bit_vectors[i].size());
+            for(int j = 0; j < num_positions; j++){
+                int64_t pos;
+                in.read((char*)&pos, sizeof(pos));
+                word_position_lookup[i].push_back(pos);
+            }
+        }
     }
     range forward(range I, char c) const{
         int64_t char_idx = get_char_idx(c);
@@ -228,17 +274,20 @@ public:
         
         if(!is_valid_string(kmer)) return {};
         
-        string s{};
+        // string s{};
+        int64_t s_len = 0;
         range I = {0, C[27]-1};
         int i = 0;
         
-        while(i < kmer.size() || s.size() > 0){
+        // while(i < kmer.size() || s.size() > 0){
+        while(i < kmer.size() || s_len > 0){
             if(i == kmer.size()){
                 i = positions.back()+1;
                 positions.pop_back();
                 I = intervals.back();
                 intervals.pop_back();
-                s.pop_back();
+                // s.pop_back();
+                s_len--;
                 used_symbols[i-1] = 0;
                 continue;
             }
@@ -248,13 +297,25 @@ public:
             }
             range I_new = forward(I, kmer[i]);
             if(!I_new.empty()){
-                s.push_back(kmer[i]);
-                if(word_rank_supports[s.size()-1](I_new.r+1) - word_rank_supports[s.size()-1](I_new.l) > 0){
-                    int64_t pos = words.at(s);
+                // s.push_back(kmer[i]);
+                s_len++;
+                // if(word_rank_supports[s.size()-1](I_new.r+1) - word_rank_supports[s.size()-1](I_new.l) > 0){
+                    // int64_t pos = words.at(s);
+                // int64_t lookup_pos = word_rank_supports[s.size()-1](I_new.l);
+                int64_t lookup_pos = word_rank_supports[s_len-1](I_new.l);
+                // if(word_rank_supports[s.size()-1](I_new.r+1) -  lookup_pos > 0){
+                if(word_rank_supports[s_len-1](I_new.r+1) -  lookup_pos > 0){
+                    // int64_t pos = word_position_lookup[s.size()-1][lookup_pos];
+                    int64_t pos = word_position_lookup[s_len-1][lookup_pos];
+                    // if(pos!=words.at(s)){
+                    //     cout << "pos: " << pos << " words.at(s): " << words.at(s) << endl;
+                    //     exit(1);
+                    // }
                     if(out.find(pos) == out.end()){
                         out.insert(pos);
                     }else{
-                        s.pop_back();
+                        // s.pop_back();
+                        s_len--;
                         i++;
                         continue;
                     }
@@ -270,6 +331,103 @@ public:
         }
         return out;
     }
+    unordered_set<MatchCollection,MatchCollectionHash> n_kangaroo_search(const string& kmer, const unordered_map<string,int64_t>& words, const int n)const{
+        //clear positions, intervals and used_symbols
+        vector<range> intervals{};
+        vector<int> positions{};
+        bit_vector used_symbols=bit_vector(kmer.size(), 0);
+
+        unordered_set<MatchCollection,MatchCollectionHash> out{};
+
+        if(!is_valid_string(kmer)) return {};
+
+        vector<string> vs(1);
+        MatchCollection mc;
+        range I = {0, C[27]-1};
+        int i = 0;
+        int64_t num_iterations = 0;
+        // int64_t num_attempts = 0;
+        // int64_t num_successes = 0;
+        int64_t total_match=0;
+        while(i < kmer.size() || vs.size()>1 || vs.back().size() > 1){
+            num_iterations++;
+            if(i == kmer.size()){
+                // s>z a , b 
+                // i>a b b c  
+                // I>0 z a 0  b
+
+                // s>z a ,  
+                // i>a b b  
+                // I>0 z a  0
+                //for str zabc, with word za, need to check which of these is the case
+                bool new_str_no_match=I.l == 0 && I.r == C[27]-1;
+                i = positions.back();
+                positions.pop_back();
+                I = intervals.back();
+                intervals.pop_back();
+                if(!new_str_no_match){
+                    vs.back().pop_back();
+                    total_match--;
+                    used_symbols[i-1] = 0;
+                }
+                if(vs.back().size() == 0){
+                    vs.pop_back();
+                    mc.v.pop_back();
+                    if(!new_str_no_match){
+                        i = positions.back();
+                        positions.pop_back();
+                        I = intervals.back();
+                        intervals.pop_back();
+                    }
+                    
+                }
+                continue;
+            }
+            if(used_symbols[i]){
+                i++;
+                continue;
+            }
+            range I_new = forward(I, kmer[i]);
+            if(!I_new.empty()){
+                vs.back().push_back(kmer[i]);
+                used_symbols[i] = 1;
+                total_match++;
+                i++;
+                positions.push_back(i);
+                intervals.push_back(I);
+                I = I_new;
+                int64_t lookup_pos = word_rank_supports[vs.back().size()-1](I_new.l);
+                if(word_rank_supports[vs.back().size()-1](I_new.r+1) - lookup_pos > 0){
+                    // cout << "lp: " << lookup_pos << endl << std::flush;
+                    // int64_t pos = words.at(vs.back());
+                    int64_t pos = word_position_lookup[vs.back().size()-1][lookup_pos];
+                    // if(pos!=words.at(vs.back())){
+                    //     cout << "pos: " << pos << " words.at(vs.back()): " << words.at(vs.back()) << endl;
+                    // }
+                    mc.v.push_back(pos);
+                    if(total_match == kmer.size() && mc.v.size() >= n){
+                        auto match_pos = out.find(mc);
+                        if(match_pos == out.end()){
+                            out.insert(mc);
+                        }else{
+                            const_cast<MatchCollection&>(*match_pos).collisions++;
+                        }
+                        mc.v.pop_back();
+                    }else{
+                        vs.push_back("");
+                        positions.push_back(i);
+                        intervals.push_back(I);
+                        i=0;
+                        I = {0, C[27]-1};
+                    }
+                }
+            }else{
+                i++;
+            }
+        }
+        return out;
+    }
+    
     unordered_set<int64_t> anagram_search(const string& kmer, const unordered_map<string,int64_t>& words)const{
         if(!is_valid_string(kmer)) return {};
         vector<range> intervals{};
@@ -294,20 +452,23 @@ public:
             return a.first < b.first;
         });
         unordered_set<int64_t> out{};
-        string s{};
+        // string s{};
+        int64_t s_len = 0;
         range I = {0, C[27]-1};
         int i = 0;
         
-        while(i < unique_chars.size() || s.size() > 0){
-            num_iterations++;
-            average_depth += s.size();
+        // while(i < unique_chars.size() || s.size() > 0){
+        while(i < unique_chars.size() || s_len > 0){
+            // num_iterations++;
+            // average_depth += s.size();
             if(i == unique_chars.size()){
                 // printf("i: %d, s: %s, I: %s, bits: %s\n", i, s.c_str(), I.to_string().c_str(),bit_vector_to_string(used_symbols).c_str());
                 i = positions.back()+1;
                 positions.pop_back();
                 I = intervals.back();
                 intervals.pop_back();
-                s.pop_back();
+                // s.pop_back();
+                s_len--;
                 unique_chars[i-1].second++;
                 continue;
             }
@@ -318,17 +479,25 @@ public:
             range I_new = forward(I, unique_chars[i].first);
             if(!I_new.empty()){
                 // printf("i: %d, s: %s, I: %s, bits: %s\n", i, s.c_str(), I.to_string().c_str(), bit_vector_to_string(used_symbols).c_str());
-                s.push_back(unique_chars[i].first);
+                // s.push_back(unique_chars[i].first);
+                s_len++;
                 num_attempts++;
-                if(word_rank_supports[s.size()-1](I_new.r+1) - word_rank_supports[s.size()-1](I_new.l) > 0){
+                // if(word_rank_supports[s.size()-1](I_new.r+1) - word_rank_supports[s.size()-1](I_new.l) > 0){
                     // out.push_back(words.at(s));
-                    int64_t pos = words.at(s);
+                    // int64_t pos = words.at(s);
+                // int64_t lookup_pos = word_rank_supports[s.size()-1](I_new.l);
+                int64_t lookup_pos = word_rank_supports[s_len-1](I_new.l);
+                // if(word_rank_supports[s.size()-1](I_new.r+1) -  lookup_pos > 0){
+                if(word_rank_supports[s_len-1](I_new.r+1) -  lookup_pos > 0){
+                    // int64_t pos = word_position_lookup[s.size()-1][lookup_pos];
+                    int64_t pos = word_position_lookup[s_len-1][lookup_pos];
                     num_successes++;
                     if(out.find(pos) == out.end()){
                         out.insert(pos);
                     }else{
                         num_collisions++;
-                        s.pop_back();
+                        // s.pop_back();
+                        s_len--;
                         i++;
                         continue;
                     }
