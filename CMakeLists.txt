@@ -45,8 +45,8 @@ message(STATUS "(n can be up to 255)")
 ## Determine build type and set flags accordingly
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release) ## Build Release by default
+  # set(CMAKE_BUILD_TYPE Debug)
 endif()
-# set(CMAKE_BUILD_TYPE Debug)
 
 # if(CMAKE_BUILD_TYPE MATCHES Release)
 #   add_compile_options(/O1)

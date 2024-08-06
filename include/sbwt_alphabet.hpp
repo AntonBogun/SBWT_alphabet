@@ -331,6 +331,67 @@ public:
         }
         return out;
     }
+
+    std::pair<bit_vector, int> rotation_search(const string& kmer, const unordered_map<string,int64_t>& words,int lim)const{
+        //clear positions, intervals and used_symbols
+        // vector<range> intervals{};
+        // vector<int> positions{};
+
+        
+        if(!is_valid_string(kmer)) return {bit_vector(kmer.size(), 0), 0};
+        
+        // string s{};
+        int i = 0;
+        int n=kmer.size();
+        bit_vector found=bit_vector(kmer.size(), 0);
+        int num_found=0;
+        
+        // while(i < kmer.size() || s.size() > 0){
+        while(i < n){
+            int64_t s_len = 0;
+            range I = {0, C[27]-1};
+            int j = 0;
+            while(j < lim){
+                range I_new = forward(I, kmer[(i+j)%n]);
+                if(!I_new.empty()){
+                    // s.push_back(kmer[i]);
+                    s_len++;
+                    if(s_len==lim){
+                        // if(word_rank_supports[s.size()-1](I_new.r+1) - word_rank_supports[s.size()-1](I_new.l) > 0){
+                            // int64_t pos = words.at(s);
+                        // int64_t lookup_pos = word_rank_supports[s.size()-1](I_new.l);
+                        int64_t lookup_pos = word_rank_supports[s_len-1](I_new.l);
+                        // if(word_rank_supports[s.size()-1](I_new.r+1) -  lookup_pos > 0){
+                        if(word_rank_supports[s_len-1](I_new.r+1) -  lookup_pos > 0){
+                            // int64_t pos = word_position_lookup[s.size()-1][lookup_pos];
+                            // int64_t pos = word_position_lookup[s_len-1][lookup_pos];
+                            // if(pos!=words.at(s)){
+                            //     cout << "pos: " << pos << " words.at(s): " << words.at(s) << endl;
+                            //     exit(1);
+                            // }
+                            
+                            // if(out.find(pos) == out.end()){
+                            //     out.insert(pos);
+                            // }else{
+                            //     // s.pop_back();
+                            //     s_len--;
+                            //     i++;
+                            //     continue;
+                            // }
+                            found[i]=1;
+                            num_found++;
+                        }
+                    }
+                    I = I_new;
+                    j++;
+                }else{
+                    break;
+                }
+            }
+            i++;
+        }
+        return {found, num_found};
+    }
     unordered_set<MatchCollection,MatchCollectionHash> n_kangaroo_search(const string& kmer, const unordered_map<string,int64_t>& words, const int n)const{
         //clear positions, intervals and used_symbols
         vector<range> intervals{};

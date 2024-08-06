@@ -4,6 +4,9 @@
 #define __get_duration(text, start, end) std::cout << text << " took " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << "ms" << std::endl; 
 // using namespace std;
 
+int64_t ceil_div(int64_t a, int64_t b) {
+    return (a + b - 1) / b;
+}
 
 class ProgressPrinter {
 public:

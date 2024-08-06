@@ -8,8 +8,8 @@
 #include <queue>
 #include <omp.h>
 #include <atomic>
-#include <filesystem>
 #include <thread>
+#include <filesystem>
 
 // #include "Main/ColorSearchMain.h"
 // #include "Main/IndexSearchMain.h"
@@ -110,7 +110,8 @@ int main3()
 enum class leaderboard_type{
     anagram,
     kangaroo,
-    n_kangaroo
+    n_kangaroo,
+    rotation
 };
 
 bool global_filter_condition(const std::string& str) {
@@ -139,10 +140,38 @@ struct PriorityQueueItem {
         return weighted_size > other.weighted_size;
     }
 };
+struct PriorityQueueRotItem {
+    int num;
+    bit_vector bv;
+    std::string str;
+    bool operator<(const PriorityQueueRotItem& other) const {
+        // return size > other.size;
+        return num > other.num;
+    }
+};
+void step_string(std::string& str,int step){
+    int i=str.size()-1;
+    while(step>0){
+        int c=str[i];
+        str[i]=(c-'a'+step)%26+'a';
+        step=(step+c-'a')/26;
+        if (step>0){
+            if(i==0){
+                str.insert(0,1,'a');
+            }else{
+                i--;
+            }
+        }
+    }
+}
+
 std::mutex cout_mutex;
 std::atomic<int> progress(0);
 std::atomic<int64_t> total_subword(0);
-std::atomic<int> kangaroo_num(2);
+int kangaroo_num(2);
+int rotation_lim(-1);
+int64_t rotation_total(0);
+
 void processLines(const std::vector<std::string>& lines, 
                   const SBWT_alphabet& sbwt, 
                   const std::unordered_map<string,int64_t>& unique_words,
@@ -234,6 +263,78 @@ priority_queue<PriorityQueueItem> calc_leaderboard(const std::vector<std::string
                 if(pq.size()<200){
                     pq.push(pq_thread.top());
                 }else if(pq_thread.top().weighted_size>pq.top().weighted_size){
+                    pq.pop();
+                    pq.push(pq_thread.top());
+                }
+                pq_thread.pop();
+            }
+        }
+    return pq;
+}
+
+void process_rotation(
+                    // const std::string& max_str,
+                    std::string start_str,
+                    int start_int,
+                    int by,
+                  const SBWT_alphabet& sbwt,
+                  const std::unordered_map<string,int64_t>& unique_words,
+                  std::vector<std::priority_queue<PriorityQueueRotItem>>& pqs,
+                    int thread_id, 
+                  int64_t global_time) {
+    // while(start_str<max_str){
+    // int max_iter=ceil_div(rotation_total,by);
+    while(start_int<rotation_total){
+        // auto matches = sbwt.kangaroo_search(lines[i], unique_words);
+        int actual_lim=rotation_lim<0 ? start_str.size()+rotation_lim : rotation_lim;
+        std::pair<bit_vector,int> matches=sbwt.rotation_search(start_str, unique_words,actual_lim);
+
+
+        if(pqs[thread_id].size() < 200) {
+            pqs[thread_id].push({matches.second,matches.first, start_str});
+        } else if(matches.second > pqs[thread_id].top().num) {
+            pqs[thread_id].pop();
+            pqs[thread_id].push({matches.second,matches.first, start_str});
+        }
+        
+        int p = ++progress;
+        if (p % 2000 == 0 && p != 0) {
+            auto now = __get_now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() - global_time;
+            int64_t expected_duration = duration * rotation_total / p;
+            int64_t expected_seconds_left = (expected_duration - duration) / 1000;
+            std::lock_guard<std::mutex> guard(cout_mutex);
+            std::cerr << "\rThread " << thread_id << ": Pos " << p << "/" << rotation_total <<" str: "<<start_str<< ", ETA: " << expected_seconds_left << "s" << std::flush;
+        }
+        step_string(start_str,by);
+        start_int+=by;
+    }
+}
+priority_queue<PriorityQueueRotItem> calc_rotation_leaderboard(int64_t total,std::string max_str,std::string start_str,
+                  const SBWT_alphabet& sbwt,
+                  const std::unordered_map<string,int64_t>& unique_words,
+                  int num_threads) {
+        progress = 0;
+        rotation_total=total;
+        std::vector<std::thread> threads(num_threads);
+        std::vector<std::priority_queue<PriorityQueueRotItem>> pqs(num_threads);
+        auto start = __get_now();
+        int64_t global_time = std::chrono::duration_cast<std::chrono::milliseconds>(start.time_since_epoch()).count();
+        for(size_t t = 0; t < num_threads; t++) {
+            // threads[t] = std::thread(process_rotation, std::ref(max_str),start_str, num_threads, std::ref(sbwt), std::ref(unique_words), std::ref(pqs), t, global_time);
+            threads[t] = std::thread(process_rotation, start_str, t, num_threads, std::ref(sbwt), std::ref(unique_words), std::ref(pqs), t, global_time);
+            step_string(start_str,1);
+        }
+        for(auto& thread : threads) {
+            thread.join();
+        }
+        cout << std::endl;
+        priority_queue<PriorityQueueRotItem> pq;
+        for(auto& pq_thread : pqs){
+            while(!pq_thread.empty()){
+                if(pq.size()<500){
+                    pq.push(pq_thread.top());
+                }else if(pq_thread.top().num>pq.top().num){
                     pq.pop();
                     pq.push(pq_thread.top());
                 }
@@ -467,10 +568,15 @@ int main2(int argc, char **argv) {
         // }
     bool do_single_word_search = 0;
     bool do_leaderboard = 1;
+
     bool do_kangaroo_leaderboard = 0;
     bool do_anagram_leaderboard = 0;
+
+    rotation_lim = -1;
+    bool do_rotation_leaderboard = 1;
+
     kangaroo_num=2;
-    bool do_n_kangaroo_leaderboard = 1;
+    bool do_n_kangaroo_leaderboard = 0;
     if (do_single_word_search) {
         string str="softheartedness";
         if(argc==3){
@@ -479,7 +585,8 @@ int main2(int argc, char **argv) {
 
         bool do_kangaroo_search = 0;
         bool do_anagram_search = 0;
-        bool do_n_kangaroo_search = 1;
+        bool do_n_kangaroo_search = 0;
+        bool do_rotation_search = 1;
         // unordered_set<int64_t> matches = sbwt.anagram_search(str, unique_words);
 
         //=
@@ -518,6 +625,18 @@ int main2(int argc, char **argv) {
             out_stream.close();
         }
         //=
+        if(do_rotation_search){
+            // std::pair<bit_vector,int> matches = sbwt.rotation_search(str, unique_words,str.size()-1);
+            std::pair<bit_vector,int> matches = sbwt.rotation_search(str, unique_words,4);
+            // ofstream out_stream("C:\\Code\\SBWT_alphabet\\anagrams4.txt");
+            ofstream out_stream((p.parent_path() / "rotation.txt").string());
+            out_stream<<str<<" " << matches.second << std::endl;
+            for(int i=0; i<str.size(); i++){
+                out_stream<<matches.first[i];
+            }
+            out_stream<<std::endl;
+            out_stream.close();
+        }
 
         // if(matches.size()>max_len_match){
         //     max_len_match=matches.size();
@@ -572,9 +691,29 @@ int main2(int argc, char **argv) {
             }
             cout<<"Total kangaroo covers: "<<total_subword<<std::endl;
         }
+        if(do_rotation_leaderboard){
+            // int64_t total=26*26*26*26*27;
+            // std::string max_str="zzzzz";
+            int64_t total=26*26*26*26;
+            std::string max_str="zzzz";
+            std::string start_str="aaaa";
+            priority_queue<PriorityQueueRotItem> pq=calc_rotation_leaderboard(total, max_str,start_str, sbwt, unique_words, num_threads);
+            // ofstream out_stream("C:\\Code\\SBWT_alphabet\\anagrams7.txt");
+            ofstream out_stream((p.parent_path() / "rotation_leaderboard.txt").string());
+            while(!pq.empty()){
+                // out_stream<<pq.top().str<<": "<<pq.top().size<<std::endl;
+                out_stream<<pq.top().str<<": "<<pq.top().num<<", (";
+                for(int i=0; i<pq.top().bv.size(); i++){
+                    out_stream<<pq.top().bv[i];
+                }
+                out_stream<<")"<<std::endl;
+                pq.pop();
+            }
+            cout<<"Rotation done"<<std::endl;
+        }
 
         end = __get_now();
-        __get_duration("Kangaroo/Anagram search", start, end);
+        __get_duration("Kangaroo/Anagram/Rotation search", start, end);
         // cout<<max_len_str<<": "<<max_len_match<<std::endl;
     }
     return 0;
